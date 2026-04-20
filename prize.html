@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Prize Result!</title>
+  <style>
+    body {
+      margin: 0;
+      background-color: #1a1a1a;
+      color: white;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+    #prize-text {
+      font-size: 8rem;
+      font-weight: bold;
+      text-align: center;
+      text-transform: uppercase;
+      text-shadow: 0 10px 20px rgba(0,0,0,0.5);
+      animation: popIn 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+    }
+    /* Dynamic colors depending on what they win! */
+    .zonk { color: #ff4757; }      /* Red for ZONK */
+    .coins { color: #ffa502; }     /* Gold for coins */
+    .doorprize { color: #2ed573; } /* Green for DOORPRIZE */
+    
+    button {
+      margin-top: 50px;
+      padding: 15px 40px;
+      font-size: 24px;
+      font-weight: bold;
+      background-color: #3742fa;
+      color: white;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    button:hover {
+      transform: scale(1.1);
+    }
+
+    @keyframes popIn {
+      0% { transform: scale(0.3); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div id="prize-text">LOADING...</div>
+  
+  <!-- Redirects back to the claw machine game -->
+  <button onclick="window.location.href='claw test 2 .html'">Play Again</button>
+
+  <script>
+    // 1. Read the ?result= parameter from the URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const result = urlParams.get('result') || 'UNKNOWN';
+    
+    // 2. Update the text on the screen
+    const prizeEl = document.getElementById('prize-text');
+    prizeEl.innerText = result;
+
+    // 3. Apply the correct color styling based on the result word
+    if (result.includes('ZONK')) {
+      prizeEl.className = 'zonk';
+    } else if (result.includes('coins')) {
+      prizeEl.className = 'coins';
+    } else if (result.includes('DOORPRIZE')) {
+      prizeEl.className = 'doorprize';
+    }
+  </script>
+</body>
+</html>

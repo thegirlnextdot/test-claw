@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Hand Tracking Claw Machine Prototype</title>
+  <style>
+    body {
+      margin: 0;
+      background-color: #1a1a1a;
+      color: white;
+      font-family: sans-serif;
+    }
+    #game-container {
+      position: relative;
+      width: 1920px;
+      height: 1080px;
+      background: rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+    }
+    #ui {
+      position: absolute;
+      top: 30px;
+      left: 40px;
+      z-index: 100;
+      font-size: 36px;
+      font-weight: bold;
+    }
+    #webcam {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="game-container">
+    <div id="ui">Loading AI...</div>
+    <video id="webcam" autoplay playsinline></video>
+
+    <!-- Layer 0: Instructions Background -->
+    <img src="instruction.png" alt="Instructions" style="position: absolute; left: 500px; top: 300px; width: 246.5px; height: 281.5px; aspect-ratio: 162/185; z-index: 1; pointer-events: none;">
+
+    <!-- Layer 1: The Game Canvas (Draws the claw behind the machine) -->
+    <canvas id="game-canvas" width="1920" height="1080" style="position: absolute; left: 0px; top: 0px; z-index: 2; pointer-events: none;"></canvas>
+
+    <!-- Layer 2: Machine Background -->
+    <img src="machine.svg" alt="Claw Machine" style="position: absolute; left: 0px; top: 0px; width: 100%; height: 100%; z-index: 5; pointer-events: none;">
+
+    <!-- Layer 3: Claw Track Constraint (Invisible) -->
+    <img src="claw-track.svg" alt="Claw Track" style="position: absolute; left: 800.897px; top: 190px; width: 950.547px; height: 10px; z-index: 6; pointer-events: none; opacity: 0;">
+
+    <!-- Layer 4: Parameter (Drop Target Zone) -->
+Z    <img id="parameter" src="parameter.svg" alt="Drop Target" style="position: absolute; right: 500.308px; top: 1000.22px; width: 48.308px; height: 48.308px; z-index: 100; pointer-events: none; transform: translateY(-50%);opacity: 0;">
+
+    <!-- Layer 4: UI Canvas (Camera and text drawn on top of the machine) -->
+    <canvas id="ui-canvas" width="1920" height="1080" style="position: absolute; left: 0px; top: 0px; z-index: 10; pointer-events: none;"></canvas>
+  </div>
+
+  <!-- MediaPipe Hand Tracking Logic -->
+  <script type="module">
+    const ui = document.getElementById('ui');
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('game-canvas');
+    const ctx = canvas.getContext('2d');
+    const uiCanvas = document.getElementById('ui-canvas');
+    const uiCtx = uiCanvas.getContext('2d');
+    const parameter = document.getElementById('parameter');
+    const gameContainer = document.getElementById('game-container');
+
+    let handLandmarker = null;
+    let lastVideoTime = -1;
+
+    // Game Variables
+    const TRACK_START = 464.897;
+    const TRACK_LENGTH = 1000.547; // Restored to the exact length of the visible claw-track.svg
+    
+    let currentX = TRACK_START + TRACK_LENGTH / 2;
+    let targetX = currentX;
+    let currentY = 280.75;
+    let targetY = 280.75;
+    
+    let isPinched = false;
+    let grabbedBall = null;
+    let clawState = 'IDLE'; // Tracks the sequence: IDLE -> DROPPING -> MOVING_TO_CHUTE -> RELEASING
+    let stateTimer = 0;
+    let currentHand = null; // Saves hand data for the UI drawing
+
+    // --- Initialize Randomized Balls ---
+    const balls = [
+      { src: 'ball-1.svg', width: '233.651px', height: '233.651px' },
+      { src: 'ball-2.svg', width: '233.651px', height: '233.651px' },
+      { src: 'ball-3.svg', width: '233.651px', height: '233.651px', transform: 'rotate(-90deg)' },
+      { src: 'ball-4.svg', width: '233.651px', height: '233.651px' },
+      { src: 'ball-5.svg', width: '233.651px', height: '233.651px' }
+    ];
+    const slotLefts = [0, 170, 340, 510, 670]; // Spaces them perfectly across the 904px container
+    let gameBalls = [];
+
+    balls.sort(() => Math.random() - 0.5); // Shuffle the balls randomly!
+    balls.forEach((ball, index) => {
+      const img = document.createElement('img');
+      img.src = ball.src;
+      img.style.position = 'absolute';
+      img.style.zIndex = '1';
+      img.style.width = ball.width;
+      img.style.height = ball.height;
+      if (ball.transform) {
+        img.style.transform = ball.transform;
+      }
+      gameContainer.appendChild(img);
+
+      // Give each ball logical game coordinates (Center of the ball)
+      const size = parseFloat(ball.width);
+      const x = 439.99 + slotLefts[index] + size / 2; // Arrayed starting 439.99px from the left edge
+      const y = 707.22; // 1080 - 372.78 (Resting exactly at 372.78px from bottom)
+      
+      gameBalls.push({ img, x, y, size, isGrabbed: false });
+    });
+
+    // --- Prize Logic ---
+    function getPrize(src) {
+      if (src.includes('ball-1') || src.includes('ball-2')) return 'ZONK';
+      if (src.includes('ball-3')) return 'DOORPRIZE';
+      if (src.includes('ball-4') || src.includes('ball-5')) {
+        const points = ['+1 coins', '+50 coins', '+100 coins'];
+        return points[Math.floor(Math.random() * points.length)];
+      }
+      return 'ZONK';
+    }
+
+    async function initializeAI() {
+      try {
+        ui.innerText = "Loading AI: Fetching library...";
+        const visionModule = await import("./vision_bundle.mjs");
+        const HandLandmarker = visionModule.HandLandmarker;
+        const FilesetResolver = visionModule.FilesetResolver;
+
+        ui.innerText = "Loading AI: Downloading core files...";
+        const vision = await FilesetResolver.forVisionTasks("./");
+        
+        ui.innerText = "Loading AI: Downloading hand model...";
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "./hand_landmarker.task",
+            delegate: "CPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 1 // Back to 1 hand!
+        });
+
+        startCamera();
+      } catch (error) {
+        console.error("AI Load Error:", error);
+        ui.innerText = "Network Error: " + error.message;
+        ui.style.color = "#ff4757";
+      }
+    }
+
+    function startCamera() {
+      navigator.mediaDevices.getUserMedia({ video: { width: 800, height: 600 } })
+        .then((stream) => {
+          video.srcObject = stream;
+          video.addEventListener("loadeddata", gameLoop);
+          ui.innerText = "Move your hand Left and Right!";
+        });
+    }
+
+    function gameLoop() {
+      // --- 1. AI Detection ---
+      if (video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const results = handLandmarker.detectForVideo(video, performance.now());
+
+        if (results.landmarks && results.landmarks.length > 0) {
+          const hand = results.landmarks[0]; // Grab the first detected hand
+          currentHand = hand; // Save for drawing the UI overlay
+          const indexFinger = hand[8];
+          const thumb = hand[4];
+
+          // 1. Control X Position (Always flexible, follows hand constantly!)
+          // Sensitivity Fix: Map the center 60% of the camera to the full track length!
+          let rawX = 1 - indexFinger.x;
+          let normalizedX = (rawX - 0.2) / 0.6; 
+          let mappedX = normalizedX * TRACK_LENGTH;
+          targetX = TRACK_START + Math.max(0, Math.min(mappedX, TRACK_LENGTH));
+          
+          // 2. Pinch Detection
+          const pinchDist = Math.hypot(indexFinger.x - thumb.x, indexFinger.y - thumb.y);
+          
+          // Think of pinch distance on a scale of 1-10. 
+          const isTightPinch = pinchDist < 0.05; // ~1 (Fingers physically touching to Grab)
+          const isWideOpen = pinchDist > 0.20;   // ~10 (Fingers spread far apart to Drop)
+          
+          // State Triggers based on pinch
+          if (clawState === 'IDLE' && isTightPinch) { 
+            clawState = 'DROPPING';
+          } else if (clawState === 'HELD' && isWideOpen) {
+            clawState = 'RELEASING'; // Let go of the ball!
+          }
+        } else {
+          currentHand = null; // Clear hand if out of frame
+        }
+      }
+      
+      // --- State Machine Sequence Logic ---
+      if (clawState === 'IDLE') {
+        targetY = 280.75; // Lowered default resting position by 10%
+        isPinched = false;
+      } else if (clawState === 'DROPPING') {
+        targetY = 707.22; // Claw only dives down to the new 707.22px limit (372.78px from bottom)
+        isPinched = false; // Keep arms open while dropping
+        if (Math.abs(currentY - targetY) < 2) { 
+          clawState = 'GRABBING';
+          isPinched = true; // Snap shut!
+          stateTimer = performance.now();
+        }
+      } else if (clawState === 'GRABBING' && performance.now() - stateTimer > 300) {
+        // Check for collisions after arms snap shut
+        for (let b of gameBalls) {
+          if (!b.isGrabbed && !grabbedBall) {
+            // INCREASED GRAB DISTANCE to 260 to make picking up practically magnetic!
+            const dist = Math.hypot(currentX - b.x, (currentY + 80) - b.y);
+            if (dist < 260) { 
+              b.isGrabbed = true;
+              grabbedBall = b;
+            }
+          }
+        }
+        clawState = 'RAISING';
+        targetY = 280.75;
+      } else if (clawState === 'RAISING') { 
+        isPinched = true; // Keep pinched while raising
+        targetY = 280.75;
+        if (Math.abs(currentY - targetY) < 2) { 
+          if (grabbedBall) {
+            clawState = 'HELD'; // Wait for you to un-pinch!
+          } else {
+            clawState = 'IDLE'; // Missed, ready to try again
+          }
+        }
+      } else if (clawState === 'HELD') {
+        isPinched = true;
+        targetY = 280.75;
+      } else if (clawState === 'RELEASING') {
+        isPinched = false; // Open arms!
+        if (grabbedBall) {
+          grabbedBall.isGrabbed = false;
+          grabbedBall = null; // Ball falls
+        }
+        clawState = 'IDLE';
+      }
+
+      // --- 2. Motion Easing ---
+      currentX += (targetX - currentX) * 0.04; // Slower, heavier mechanical easing for finer control
+      currentY += (targetY - currentY) * 0.06; // Slower, more deliberate dropping and raising
+
+      // --- 3. Physics, DOM Sync & Prize Collisions ---
+
+      gameBalls.forEach(b => {
+        if (b.isGrabbed) {
+          b.x = currentX;
+          b.y = currentY + 80; // Hang securely inside the claw
+          b.wasGrabbed = true; // Mark that it was picked up
+        } else if (b.y < 707.22) {
+          b.y += 18; // Gravity: Fall to the floor!
+        } else if (b.y > 707.22) {
+          b.y = 707.22; // New Floor limit
+        }
+
+        // Prize Collision Logic: When a previously grabbed ball hits the floor
+        if (!b.isGrabbed && b.y >= 707.22 && b.wasGrabbed) {
+          b.wasGrabbed = false; // Only trigger once!
+          
+          // Check if it dropped near the red circle target at the end of the extended track (X is ~1390.6)
+          if (Math.abs(b.x - 1390.599) < 150) {
+            const prizeResult = getPrize(b.img.src);
+            
+            // Redirect to the prize page!
+            // Passing the result as a URL parameter
+            window.location.href = `prize.html?result=${encodeURIComponent(prizeResult)}`;
+          }
+        }
+
+        // Apply logical coordinates to the SVG DOM Elements
+        b.img.style.left = `${b.x - b.size / 2}px`;
+        b.img.style.top = `${b.y - b.size / 2}px`;
+      });
+
+      // --- 4. Draw Canvas Claw ---
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
+
+      // Draw String
+      ctx.beginPath();
+      ctx.moveTo(currentX, 172.75); // Draw string from the new exact top
+      ctx.lineTo(currentX, currentY - 30);
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = "#aaaaaa";
+      ctx.stroke();
+
+      // Prongs
+      const spread = isPinched ? 25 : 55;
+      const tipSpread = isPinched ? 10 : 40;
+      
+      ctx.strokeStyle = "#bdc3c7"; 
+      ctx.lineWidth = 12;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      ctx.beginPath();
+      ctx.moveTo(currentX - 25, currentY);
+      ctx.lineTo(currentX - spread, currentY + 40);
+      ctx.lineTo(currentX - tipSpread, currentY + 70);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(currentX + 25, currentY);
+      ctx.lineTo(currentX + spread, currentY + 40);
+      ctx.lineTo(currentX + tipSpread, currentY + 70);
+      ctx.stroke();
+
+      // Base Cap
+      ctx.fillStyle = "#ff4757"; 
+      ctx.beginPath();
+      ctx.arc(currentX, currentY, 35, Math.PI, 0); 
+      ctx.fill();
+      ctx.fillRect(currentX - 35, currentY, 70, 15); 
+
+      // --- 5. Draw Mini Camera & Hand UI (Bottom Left) ---
+      const camWidth = 384; // 20% of 1920
+      const camHeight = 288; // 4:3 aspect ratio matching the 800x600 webcam
+      const camX = 0;
+      const camY = canvas.height - camHeight;
+
+      // Background border
+      uiCtx.fillStyle = "rgba(0, 0, 0, 0.6)";
+      uiCtx.fillRect(camX, camY, camWidth, camHeight);
+
+      // Draw mirrored video
+      if (video.readyState >= 2) {
+        uiCtx.save();
+        uiCtx.translate(camX + camWidth, camY);
+        uiCtx.scale(-1, 1); // Mirror
+        uiCtx.drawImage(video, 0, 0, camWidth, camHeight);
+        uiCtx.restore();
+      }
+
+      // --- 5. Draw Mini Camera & Hand UI (Simplified) ---
+      if (currentHand) {
+        const indexFinger = currentHand[8];
+        const thumb = currentHand[4];
+        
+        const indX = camX + (1 - indexFinger.x) * camWidth;
+        const indY = camY + indexFinger.y * camHeight;
+        const thmX = camX + (1 - thumb.x) * camWidth;
+        const thmY = camY + thumb.y * camHeight;
+        
+        const color = isPinched ? "#ff4757" : "#2ed573";
+
+        // Connecting line
+        uiCtx.strokeStyle = color;
+        uiCtx.lineWidth = 4;
+        uiCtx.beginPath();
+        uiCtx.moveTo(indX, indY);
+        uiCtx.lineTo(thmX, thmY);
+        uiCtx.stroke();
+        
+        // Thumb and Index Dots
+        uiCtx.fillStyle = color;
+        uiCtx.beginPath(); uiCtx.arc(indX, indY, 8, 0, 2 * Math.PI); uiCtx.fill();
+        uiCtx.beginPath(); uiCtx.arc(thmX, thmY, 8, 0, 2 * Math.PI); uiCtx.fill();
+        
+        // Status Text
+        uiCtx.fillStyle = "white";
+        uiCtx.font = "bold 24px sans-serif";
+        uiCtx.fillText(isPinched ? "GRABBING" : "MOVING", camX + 20, camY + 40);
+      }
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    initializeAI();
+  </script>
+</body>
+</html>
